@@ -62,9 +62,8 @@ if "last_menu" not in st.session_state:
 if "current_menu" not in st.session_state:
     st.session_state.current_menu = []
 
-# --- 5. 献立生成・変更ロジック ---
+# --- 5. 献立生成ロジック ---
 def is_in_season(season_str, current):
-    # 登録された季節に、現在の季節または「通年」が含まれているか判定
     seasons = [s.strip() for s in season_str.split(",")]
     return "通年" in seasons or current in seasons
 
@@ -97,25 +96,8 @@ def generate_menu(days=3):
     st.session_state.last_menu = selected
     st.session_state.current_menu = selected
 
-# 献立を1つだけ変更する機能
-def change_single_menu(index):
-    df = st.session_state.recipes
-    available_df = df[df["季節"].apply(lambda x: is_in_season(x, current_season))]
-    # 現在選ばれている献立と、前回の献立を除外
-    exclude_list = st.session_state.current_menu + st.session_state.last_menu
-    available_df = available_df[~available_df["料理名"].isin(exclude_list)]
-    
-    if len(available_df) > 0:
-        new_item = available_df.sample(1)["料理名"].values[0]
-        st.session_state.current_menu[index] = new_item
-        st.session_state.last_menu = st.session_state.current_menu.copy()
-    else:
-        st.warning("これ以上入れ替えられる候補がありません。")
-
 # --- 6. 画面UI構築 ---
 page = st.sidebar.radio("メニュー", ["🏠 ホーム", "🍳 レシピ管理", "❄️ 冷蔵庫管理"])
-
-# サイドバーに現在の季節を表示
 st.sidebar.write("---")
 st.sidebar.write(f"現在の季節判定: **{current_season}**")
 
@@ -123,7 +105,7 @@ st.sidebar.write(f"現在の季節判定: **{current_season}**")
 # 🏠 ホーム画面
 # ==========================================
 if page == "🏠 ホーム":
-    st.title("今週の献立＆買い物リスト")
+    st.title("今週の献立＆買い物")
     
     days_to_plan = st.slider("何日分の献立を作りますか？", 1, 7, 3)
     if st.button(f"{days_to_plan}日分の献立を自動生成", type="primary"):
@@ -132,52 +114,63 @@ if page == "🏠 ホーム":
     if st.session_state.current_menu:
         st.subheader("🍽️ 決定した献立")
         df_recipes = st.session_state.recipes
+        available_recipes = df_recipes["料理名"].tolist()
         
-        # 献立リストと個別変更ボタンの表示
+        # コピー用のテキスト用変数
+        copy_text = "🍳 今週の献立\n\n"
+        
         for i, menu_item in enumerate(st.session_state.current_menu):
-            if menu_item in df_recipes["料理名"].values:
-                row = df_recipes[df_recipes["料理名"] == menu_item].iloc[0]
+            # 万が一削除されたレシピが残っていた場合用
+            if menu_item not in available_recipes:
+                available_recipes.append(menu_item)
+                
+            # 自由に選択できるドロップダウン（セレクトボックス）
+            new_item = st.selectbox(
+                f"Day {i+1} の献立", 
+                options=available_recipes, 
+                index=available_recipes.index(menu_item),
+                key=f"select_{i}"
+            )
+            
+            # 手動で変更された場合はデータを更新して画面をリロード
+            if new_item != menu_item:
+                st.session_state.current_menu[i] = new_item
+                st.rerun()
+
+            # 食材と在庫の照合
+            if new_item in df_recipes["料理名"].values:
+                row = df_recipes[df_recipes["料理名"] == new_item].iloc[0]
                 diff = row["難易度"]
-                ings = row["食材"]
+                ings_raw = [item.strip() for item in row["食材"].split(",")]
             else:
                 diff = "?"
-                ings = "不明"
+                ings_raw = ["不明"]
 
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.write(f"**Day {i+1} : {menu_item}** (難易度: {diff})")
-                st.caption(f"🥕 材料: {ings}") # 個別の材料表示
-            with col2:
-                if st.button("🔄 変更", key=f"change_{i}"):
-                    change_single_menu(i)
-                    st.rerun()
-            st.divider() # 線の区切り
-        
-        # 買い物リスト（全体）の生成
-        st.subheader("🛒 必要な食材（全体まとめ）")
-        all_ingredients = []
-        for menu_item in st.session_state.current_menu:
-            if menu_item in df_recipes["料理名"].values:
-                ing_str = df_recipes[df_recipes["料理名"] == menu_item]["食材"].values[0]
-                ings = [item.strip() for item in ing_str.split(",")]
-                all_ingredients.extend(ings)
-        
-        unique_ingredients = sorted(list(set(all_ingredients)))
-        
-        buy_list = [item for item in unique_ingredients if item not in st.session_state.inventory]
-        stock_list = [item for item in unique_ingredients if item in st.session_state.inventory]
-                
-        if buy_list:
-            st.write("🔴 **買うもの**")
-            for item in buy_list:
-                st.write(f"- [ ] {item}")
-        else:
-            st.success("買うものはありません！")
+            display_ings = []
+            buy_ings_for_copy = []
+            for ing in ings_raw:
+                if ing in st.session_state.inventory:
+                    display_ings.append(f"~{ing}~") # 画面表示用（取り消し線を引く）
+                else:
+                    display_ings.append(ing)
+                    buy_ings_for_copy.append(ing) # コピー用（必要なものだけをリストアップ）
             
-        if stock_list:
-            st.write("🟢 **家にあるもの（不要）**")
-            for item in stock_list:
-                st.markdown(f"- ~{item}~ (在庫あり)")
+            ings_str = ", ".join(display_ings)
+            st.caption(f"難易度: {diff}")
+            st.markdown(f"🥕 材料: {ings_str}")
+            st.divider()
+
+            # コピー用テキストに追記
+            copy_text += f"【Day {i+1}】{new_item}\n"
+            if buy_ings_for_copy:
+                copy_text += f"🛒 買うもの: {', '.join(buy_ings_for_copy)}\n\n"
+            else:
+                copy_text += f"🛒 買うもの: なし\n\n"
+
+        # LINE共有用のコピー機能
+        st.subheader("📱 LINE等に共有")
+        st.write("右上のマークをタップしてコピーできます。")
+        st.code(copy_text, language="text")
 
 # ==========================================
 # 🍳 レシピ管理画面
@@ -192,7 +185,6 @@ elif page == "🍳 レシピ管理":
         new_diff = st.slider("難易度", 1, 5, 3)
         new_ings = st.text_input("必要な食材（カンマ `,` 区切りで入力）", placeholder="豚肉, キャベツ, 味噌")
         
-        # 季節の複数選択
         season_options = ["通年", "春", "夏", "秋", "冬"]
         new_seasons = st.multiselect("季節を選択", season_options, default=["通年"])
         
