@@ -62,7 +62,7 @@ if "last_menu" not in st.session_state:
 if "current_menu" not in st.session_state:
     st.session_state.current_menu = []
 
-# --- 5. 献立生成ロジック ---
+# --- 5. 献立生成・更新ロジック ---
 def is_in_season(season_str, current):
     seasons = [s.strip() for s in season_str.split(",")]
     return "通年" in seasons or current in seasons
@@ -94,6 +94,11 @@ def generate_menu(days=3):
     st.session_state.last_menu = selected
     st.session_state.current_menu = selected
 
+# 手動でドロップダウンを変更した際に確実にデータを更新するための関数
+def update_menu_selection(index):
+    st.session_state.current_menu[index] = st.session_state[f"select_{index}"]
+
+
 # --- 6. 画面UI構築 ---
 page = st.sidebar.radio("メニュー", ["🏠 ホーム", "🍳 レシピ管理", "❄️ 冷蔵庫管理"])
 st.sidebar.write("---")
@@ -105,7 +110,7 @@ st.sidebar.write(f"現在の季節判定: **{current_season}**")
 if page == "🏠 ホーム":
     st.title("今週の献立＆買い物")
     
-    # --- 【新規】ホーム画面の冷蔵庫管理（折りたたみ） ---
+    # --- 冷蔵庫の在庫を追加・確認 ---
     with st.expander("❄️ 冷蔵庫の在庫を追加・確認", expanded=False):
         col_in1, col_in2 = st.columns([3, 1])
         with col_in1:
@@ -124,7 +129,7 @@ if page == "🏠 ホーム":
                 if st.button(f"🗑 {item}", key=f"del_home_{item}"):
                     st.session_state.inventory.remove(item)
                     st.rerun()
-    st.write("") # スペース調整
+    st.write("")
     
     # --- 献立生成 ---
     days_to_plan = st.slider("何日分の献立を作りますか？", 1, 7, 3)
@@ -142,19 +147,21 @@ if page == "🏠 ホーム":
             if menu_item not in available_recipes:
                 available_recipes.append(menu_item)
                 
-            new_item = st.selectbox(
+            # ドロップダウン（変更時に確実に update_menu_selection を呼び出す）
+            st.selectbox(
                 f"Day {i+1} の献立", 
                 options=available_recipes, 
                 index=available_recipes.index(menu_item),
-                key=f"select_{i}"
+                key=f"select_{i}",
+                on_change=update_menu_selection,
+                args=(i,)
             )
             
-            if new_item != menu_item:
-                st.session_state.current_menu[i] = new_item
-                st.rerun()
+            # ドロップダウンの変更が反映された最新のメニューを取得
+            current_item = st.session_state.current_menu[i]
 
-            if new_item in df_recipes["料理名"].values:
-                row = df_recipes[df_recipes["料理名"] == new_item].iloc[0]
+            if current_item in df_recipes["料理名"].values:
+                row = df_recipes[df_recipes["料理名"] == current_item].iloc[0]
                 diff = row["難易度"]
                 ings_raw = [item.strip() for item in row["食材"].split(",")]
             else:
@@ -175,7 +182,7 @@ if page == "🏠 ホーム":
             st.markdown(f"🥕 材料: {ings_str}")
             st.divider()
 
-            copy_text += f"【Day {i+1}】{new_item}\n"
+            copy_text += f"【Day {i+1}】{current_item}\n"
             if buy_ings_for_copy:
                 copy_text += f"🛒 買うもの: {', '.join(buy_ings_for_copy)}\n\n"
             else:
