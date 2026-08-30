@@ -69,9 +69,7 @@ def is_in_season(season_str, current):
 
 def generate_menu(days=3):
     df = st.session_state.recipes
-    # 季節フィルター
     available_df = df[df["季節"].apply(lambda x: is_in_season(x, current_season))]
-    # 前回分を除外
     available_df = available_df[~available_df["料理名"].isin(st.session_state.last_menu)]
     
     if len(available_df) < days:
@@ -107,6 +105,28 @@ st.sidebar.write(f"現在の季節判定: **{current_season}**")
 if page == "🏠 ホーム":
     st.title("今週の献立＆買い物")
     
+    # --- 【新規】ホーム画面の冷蔵庫管理（折りたたみ） ---
+    with st.expander("❄️ 冷蔵庫の在庫を追加・確認", expanded=False):
+        col_in1, col_in2 = st.columns([3, 1])
+        with col_in1:
+            home_stock = st.text_input("食材を追加", key="home_stock_input")
+        with col_in2:
+            st.write("")
+            st.write("")
+            if st.button("追加", key="home_stock_btn"):
+                if home_stock and home_stock not in st.session_state.inventory:
+                    st.session_state.inventory.append(home_stock.strip())
+                    st.rerun()
+        
+        if st.session_state.inventory:
+            st.write("【現在の在庫】※タップで消費（削除）")
+            for item in st.session_state.inventory:
+                if st.button(f"🗑 {item}", key=f"del_home_{item}"):
+                    st.session_state.inventory.remove(item)
+                    st.rerun()
+    st.write("") # スペース調整
+    
+    # --- 献立生成 ---
     days_to_plan = st.slider("何日分の献立を作りますか？", 1, 7, 3)
     if st.button(f"{days_to_plan}日分の献立を自動生成", type="primary"):
         generate_menu(days_to_plan)
@@ -116,15 +136,12 @@ if page == "🏠 ホーム":
         df_recipes = st.session_state.recipes
         available_recipes = df_recipes["料理名"].tolist()
         
-        # コピー用のテキスト用変数
         copy_text = "🍳 今週の献立\n\n"
         
         for i, menu_item in enumerate(st.session_state.current_menu):
-            # 万が一削除されたレシピが残っていた場合用
             if menu_item not in available_recipes:
                 available_recipes.append(menu_item)
                 
-            # 自由に選択できるドロップダウン（セレクトボックス）
             new_item = st.selectbox(
                 f"Day {i+1} の献立", 
                 options=available_recipes, 
@@ -132,12 +149,10 @@ if page == "🏠 ホーム":
                 key=f"select_{i}"
             )
             
-            # 手動で変更された場合はデータを更新して画面をリロード
             if new_item != menu_item:
                 st.session_state.current_menu[i] = new_item
                 st.rerun()
 
-            # 食材と在庫の照合
             if new_item in df_recipes["料理名"].values:
                 row = df_recipes[df_recipes["料理名"] == new_item].iloc[0]
                 diff = row["難易度"]
@@ -150,24 +165,22 @@ if page == "🏠 ホーム":
             buy_ings_for_copy = []
             for ing in ings_raw:
                 if ing in st.session_state.inventory:
-                    display_ings.append(f"~{ing}~") # 画面表示用（取り消し線を引く）
+                    display_ings.append(f"~{ing}~")
                 else:
                     display_ings.append(ing)
-                    buy_ings_for_copy.append(ing) # コピー用（必要なものだけをリストアップ）
+                    buy_ings_for_copy.append(ing)
             
             ings_str = ", ".join(display_ings)
             st.caption(f"難易度: {diff}")
             st.markdown(f"🥕 材料: {ings_str}")
             st.divider()
 
-            # コピー用テキストに追記
             copy_text += f"【Day {i+1}】{new_item}\n"
             if buy_ings_for_copy:
                 copy_text += f"🛒 買うもの: {', '.join(buy_ings_for_copy)}\n\n"
             else:
                 copy_text += f"🛒 買うもの: なし\n\n"
 
-        # LINE共有用のコピー機能
         st.subheader("📱 LINE等に共有")
         st.write("右上のマークをタップしてコピーできます。")
         st.code(copy_text, language="text")
@@ -211,11 +224,11 @@ elif page == "❄️ 冷蔵庫管理":
     
     col1, col2 = st.columns([3, 1])
     with col1:
-        new_stock = st.text_input("食材を追加")
+        new_stock = st.text_input("食材を追加", key="page_stock_input")
     with col2:
         st.write("")
         st.write("")
-        if st.button("追加"):
+        if st.button("追加", key="page_stock_btn"):
             if new_stock and new_stock not in st.session_state.inventory:
                 st.session_state.inventory.append(new_stock.strip())
                 st.rerun()
@@ -226,6 +239,6 @@ elif page == "❄️ 冷蔵庫管理":
         with colA:
             st.write(f"- {item}")
         with colB:
-            if st.button("消費", key=f"del_{item}"):
+            if st.button("消費", key=f"del_page_{item}"):
                 st.session_state.inventory.remove(item)
                 st.rerun()
