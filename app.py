@@ -68,6 +68,11 @@ def is_in_season(season_str, current):
     return "通年" in seasons or current in seasons
 
 def generate_menu(days=3):
+    # 【追加修正】日数を変更した際などに、ドロップダウンの古い記憶（キャッシュ）が悪さをしないようにリセットする
+    for key in list(st.session_state.keys()):
+        if key.startswith("select_"):
+            del st.session_state[key]
+
     df = st.session_state.recipes
     available_df = df[df["季節"].apply(lambda x: is_in_season(x, current_season))]
     available_df = available_df[~available_df["料理名"].isin(st.session_state.last_menu)]
@@ -147,7 +152,7 @@ if page == "🏠 ホーム":
             if menu_item not in available_recipes:
                 available_recipes.append(menu_item)
                 
-            # ドロップダウン（変更時に確実に update_menu_selection を呼び出す）
+            # ドロップダウン
             st.selectbox(
                 f"Day {i+1} の献立", 
                 options=available_recipes, 
