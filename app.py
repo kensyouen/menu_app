@@ -62,46 +62,69 @@ if "last_menu" not in st.session_state:
 if "current_menu" not in st.session_state:
     st.session_state.current_menu = []
 
+# 【超重要】ドロップダウンの古い記憶をリセットするためのID
+if "menu_gen_id" not in st.session_state:
+    st.session_state.menu_gen_id = 0
+
 # --- 5. 献立生成・更新ロジック ---
 def is_in_season(season_str, current):
     seasons = [s.strip() for s in season_str.split(",")]
     return "通年" in seasons or current in seasons
 
 def generate_menu(days=3):
-    # 【追加修正】日数を変更した際などに、ドロップダウンの古い記憶（キャッシュ）が悪さをしないようにリセットする
-    for key in list(st.session_state.keys()):
-        if key.startswith("select_"):
-            del st.session_state[key]
-
+    # 生成するたびにIDを更新（これで過去のドロップダウンのバグが完全にリセットされます）
+    st.session_state.menu_gen_id += 1
+    
     df = st.session_state.recipes
     available_df = df[df["季節"].apply(lambda x: is_in_season(x, current_season))]
-    available_df = available_df[~available_df["料理名"].isin(st.session_state.last_menu)]
     
-    if len(available_df) < days:
-        st.warning("条件に合うレシピが足りないため、履歴をリセットして生成します。")
-        available_df = df[df["季節"].apply(lambda x: is_in_season(x, current_season))]
+    # 前回分の献立を除外したプールを作成
+    pool_df = available_df[~available_df["料理名"].isin(st.session_state.last_menu)]
+    
+    # もし前回分を除外すると数が足りない場合は、前回分も解禁する
+    if len(pool_df) < days:
+        pool_df = available_df
         st.session_state.last_menu = []
 
     selected = []
     high_diff_count = 0
-    shuffled_df = available_df.sample(frac=1).reset_index(drop=True)
     
-    for _, row in shuffled_df.iterrows():
-        if len(selected) == days:
-            break
-        if row["難易度"] >= 4:
-            if high_diff_count == 0:
-                selected.append(row["料理名"])
-                high_diff_count += 1
-        else:
-            selected.append(row["料理名"])
+    # 重複を絶対に防ぎながら、指定された日数分ループして選出
+    while len(selected) < days:
+        if len(pool_df) == 0:
+            # 万が一、季節のレシピ数が日数を下回る場合のみ重複を許可
+            pool_df = available_df
+            if len(pool_df) == 0:
+                break # レシピが0件の場合は強制終了
+                
+        shuffled_df = pool_df.sample(frac=1).reset_index(drop=True)
+        
+        for _, row in shuffled_df.iterrows():
+            if len(selected) == days:
+                break
+            
+            recipe_name = row["料理名"]
+            
+            # 既に選ばれている献立はスキップ（重複防止）
+            if recipe_name in selected:
+                continue
+                
+            if row["難易度"] >= 4:
+                if high_diff_count == 0:
+                    selected.append(recipe_name)
+                    high_diff_count += 1
+            else:
+                selected.append(recipe_name)
+                
+        # 一度選んだものはプールから除外
+        pool_df = pool_df[~pool_df["料理名"].isin(selected)]
 
-    st.session_state.last_menu = selected
-    st.session_state.current_menu = selected
+    st.session_state.last_menu = selected.copy()
+    st.session_state.current_menu = selected.copy()
 
-# 手動でドロップダウンを変更した際に確実にデータを更新するための関数
-def update_menu_selection(index):
-    st.session_state.current_menu[index] = st.session_state[f"select_{index}"]
+# ドロップダウン変更時に瞬時に反映させるための関数
+def update_menu_selection(index, key):
+    st.session_state.current_menu[index] = st.session_state[key]
 
 
 # --- 6. 画面UI構築 ---
@@ -115,7 +138,6 @@ st.sidebar.write(f"現在の季節判定: **{current_season}**")
 if page == "🏠 ホーム":
     st.title("今週の献立＆買い物")
     
-    # --- 冷蔵庫の在庫を追加・確認 ---
     with st.expander("❄️ 冷蔵庫の在庫を追加・確認", expanded=False):
         col_in1, col_in2 = st.columns([3, 1])
         with col_in1:
@@ -136,7 +158,6 @@ if page == "🏠 ホーム":
                     st.rerun()
     st.write("")
     
-    # --- 献立生成 ---
     days_to_plan = st.slider("何日分の献立を作りますか？", 1, 7, 3)
     if st.button(f"{days_to_plan}日分の献立を自動生成", type="primary"):
         generate_menu(days_to_plan)
@@ -152,17 +173,18 @@ if page == "🏠 ホーム":
             if menu_item not in available_recipes:
                 available_recipes.append(menu_item)
                 
-            # ドロップダウン
+            # ここで専用のIDを含んだキーを使うことで、過去の記憶を引き継がないようにする
+            select_key = f"select_{st.session_state.menu_gen_id}_{i}"
+            
             st.selectbox(
                 f"Day {i+1} の献立", 
                 options=available_recipes, 
                 index=available_recipes.index(menu_item),
-                key=f"select_{i}",
+                key=select_key,
                 on_change=update_menu_selection,
-                args=(i,)
+                args=(i, select_key)
             )
             
-            # ドロップダウンの変更が反映された最新のメニューを取得
             current_item = st.session_state.current_menu[i]
 
             if current_item in df_recipes["料理名"].values:
@@ -215,16 +237,20 @@ elif page == "🍳 レシピ管理":
         
         if st.form_submit_button("追加する"):
             if new_name and new_ings and new_seasons:
-                new_seasons_str = ", ".join(new_seasons)
-                new_row = pd.DataFrame({
-                    "料理名": [new_name], 
-                    "難易度": [new_diff], 
-                    "食材": [new_ings], 
-                    "季節": [new_seasons_str]
-                })
-                st.session_state.recipes = pd.concat([st.session_state.recipes, new_row], ignore_index=True)
-                st.success(f"「{new_name}」を追加しました！")
-                st.rerun()
+                # レシピ名の重複登録を防止
+                if new_name in st.session_state.recipes["料理名"].values:
+                    st.error(f"「{new_name}」はすでに登録されています！別の名前にしてください。")
+                else:
+                    new_seasons_str = ", ".join(new_seasons)
+                    new_row = pd.DataFrame({
+                        "料理名": [new_name], 
+                        "難易度": [new_diff], 
+                        "食材": [new_ings], 
+                        "季節": [new_seasons_str]
+                    })
+                    st.session_state.recipes = pd.concat([st.session_state.recipes, new_row], ignore_index=True)
+                    st.success(f"「{new_name}」を追加しました！")
+                    st.rerun()
             else:
                 st.error("入力項目に不足があります。")
 
