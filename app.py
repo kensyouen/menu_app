@@ -2,11 +2,14 @@ import streamlit as st
 import pandas as pd
 import random
 import datetime
+import json
+import gspread
+from google.oauth2.service_account import Credentials
 
 # --- 1. ページ設定 ---
 st.set_page_config(page_title="献立自動化アプリ", page_icon="🍳", layout="centered")
 
-# --- 2. 簡易ログイン認証 ---
+# --- 2. ログイン認証 ---
 def check_password():
     if "password_correct" not in st.session_state:
         st.session_state["password_correct"] = False
@@ -15,7 +18,8 @@ def check_password():
         st.title("ログイン")
         password = st.text_input("パスワードを入力", type="password")
         if st.button("ログイン"):
-            if password == "1234":
+            # Secretsに設定したパスワードと照合
+            if password == str(st.secrets.get("password", "1234")):
                 st.session_state["password_correct"] = True
                 st.rerun()
             else:
@@ -26,7 +30,49 @@ def check_password():
 if not check_password():
     st.stop()
 
-# --- 3. 季節を自動判定する関数 ---
+# --- 3. スプレッドシート連携（初期化） ---
+@st.cache_resource
+def init_connection():
+    creds_json = json.loads(st.secrets["google_credentials"])
+    scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+    creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
+    client = gspread.authorize(creds)
+    return client
+
+client = init_connection()
+sheet = client.open_by_url(st.secrets["sheet_url"])
+recipe_ws = sheet.worksheet("レシピ")
+inventory_ws = sheet.worksheet("冷蔵庫")
+
+# データを読み込む関数
+def load_data():
+    recipes_records = recipe_ws.get_all_records()
+    if recipes_records:
+        st.session_state.recipes = pd.DataFrame(recipes_records)
+    else:
+        st.session_state.recipes = pd.DataFrame(columns=["料理名", "難易度", "食材", "季節"])
+        
+    inv_records = inventory_ws.col_values(1)
+    if len(inv_records) > 1:
+        st.session_state.inventory = inv_records[1:]
+    else:
+        st.session_state.inventory = []
+
+# 初回起動時にデータを読み込む
+if "data_loaded" not in st.session_state:
+    load_data()
+    st.session_state.data_loaded = True
+    st.session_state.last_menu = []
+    st.session_state.current_menu = []
+    st.session_state.menu_gen_id = 0
+
+# 冷蔵庫のデータをスプレッドシートに上書きする関数
+def update_inventory_sheet():
+    inventory_ws.clear()
+    data = [["食材名"]] + [[x] for x in st.session_state.inventory]
+    inventory_ws.update(values=data, range_name="A1")
+
+# --- 4. 季節判定＆献立生成ロジック ---
 def get_current_season():
     month = datetime.datetime.now().month
     if 3 <= month <= 5:
@@ -40,48 +86,16 @@ def get_current_season():
 
 current_season = get_current_season()
 
-# --- 4. 初期データ（プレビュー用） ---
-if "recipes" not in st.session_state:
-    st.session_state.recipes = pd.DataFrame({
-        "料理名": ["カレーライス", "肉じゃが", "生姜焼き", "冷やし中華", "ハンバーグ", "鍋料理", "そうめん"],
-        "難易度": [2, 3, 2, 2, 4, 2, 1],
-        "食材": ["豚肉, 玉ねぎ, にんじん, じゃがいも, カレールー", 
-               "豚肉, じゃがいも, にんじん, 玉ねぎ, しらたき", 
-               "豚肉, 玉ねぎ, キャベツ, しょうが", 
-               "中華麺, きゅうり, ハム, 卵, トマト", 
-               "ひき肉, 玉ねぎ, 卵, 牛乳, パン粉", 
-               "白菜, 豚バラ, 長ねぎ, 豆腐, きのこ",
-               "そうめん, めんつゆ, ねぎ"],
-        "季節": ["通年", "通年, 秋, 冬", "通年", "夏", "通年", "冬", "夏"]
-    })
-
-if "inventory" not in st.session_state:
-    st.session_state.inventory = ["玉ねぎ", "じゃがいも", "卵"]
-if "last_menu" not in st.session_state:
-    st.session_state.last_menu = []
-if "current_menu" not in st.session_state:
-    st.session_state.current_menu = []
-
-# 【超重要】ドロップダウンの古い記憶をリセットするためのID
-if "menu_gen_id" not in st.session_state:
-    st.session_state.menu_gen_id = 0
-
-# --- 5. 献立生成・更新ロジック ---
 def is_in_season(season_str, current):
-    seasons = [s.strip() for s in season_str.split(",")]
+    seasons = [s.strip() for s in str(season_str).split(",")]
     return "通年" in seasons or current in seasons
 
 def generate_menu(days=3):
-    # 生成するたびにIDを更新（これで過去のドロップダウンのバグが完全にリセットされます）
     st.session_state.menu_gen_id += 1
-    
     df = st.session_state.recipes
     available_df = df[df["季節"].apply(lambda x: is_in_season(x, current_season))]
-    
-    # 前回分の献立を除外したプールを作成
     pool_df = available_df[~available_df["料理名"].isin(st.session_state.last_menu)]
     
-    # もし前回分を除外すると数が足りない場合は、前回分も解禁する
     if len(pool_df) < days:
         pool_df = available_df
         st.session_state.last_menu = []
@@ -89,48 +103,43 @@ def generate_menu(days=3):
     selected = []
     high_diff_count = 0
     
-    # 重複を絶対に防ぎながら、指定された日数分ループして選出
     while len(selected) < days:
         if len(pool_df) == 0:
-            # 万が一、季節のレシピ数が日数を下回る場合のみ重複を許可
             pool_df = available_df
             if len(pool_df) == 0:
-                break # レシピが0件の場合は強制終了
+                break
                 
         shuffled_df = pool_df.sample(frac=1).reset_index(drop=True)
-        
         for _, row in shuffled_df.iterrows():
             if len(selected) == days:
                 break
-            
             recipe_name = row["料理名"]
-            
-            # 既に選ばれている献立はスキップ（重複防止）
             if recipe_name in selected:
                 continue
-                
-            if row["難易度"] >= 4:
+            if int(row["難易度"]) >= 4:
                 if high_diff_count == 0:
                     selected.append(recipe_name)
                     high_diff_count += 1
             else:
                 selected.append(recipe_name)
-                
-        # 一度選んだものはプールから除外
         pool_df = pool_df[~pool_df["料理名"].isin(selected)]
 
     st.session_state.last_menu = selected.copy()
     st.session_state.current_menu = selected.copy()
 
-# ドロップダウン変更時に瞬時に反映させるための関数
 def update_menu_selection(index, key):
     st.session_state.current_menu[index] = st.session_state[key]
 
 
-# --- 6. 画面UI構築 ---
+# --- 5. 画面UI構築 ---
 page = st.sidebar.radio("メニュー", ["🏠 ホーム", "🍳 レシピ管理", "❄️ 冷蔵庫管理"])
 st.sidebar.write("---")
 st.sidebar.write(f"現在の季節判定: **{current_season}**")
+
+# 手動で最新のデータを読み込むボタン（別端末で更新した時用）
+if st.sidebar.button("🔁 最新のデータに更新"):
+    load_data()
+    st.sidebar.success("データを最新にしました！")
 
 # ==========================================
 # 🏠 ホーム画面
@@ -148,6 +157,7 @@ if page == "🏠 ホーム":
             if st.button("追加", key="home_stock_btn"):
                 if home_stock and home_stock not in st.session_state.inventory:
                     st.session_state.inventory.append(home_stock.strip())
+                    inventory_ws.append_row([home_stock.strip()]) # シートに書き込み
                     st.rerun()
         
         if st.session_state.inventory:
@@ -155,6 +165,7 @@ if page == "🏠 ホーム":
             for item in st.session_state.inventory:
                 if st.button(f"🗑 {item}", key=f"del_home_{item}"):
                     st.session_state.inventory.remove(item)
+                    update_inventory_sheet() # シートから削除
                     st.rerun()
     st.write("")
     
@@ -166,16 +177,13 @@ if page == "🏠 ホーム":
         st.subheader("🍽️ 決定した献立")
         df_recipes = st.session_state.recipes
         available_recipes = df_recipes["料理名"].tolist()
-        
         copy_text = "🍳 今週の献立\n\n"
         
         for i, menu_item in enumerate(st.session_state.current_menu):
             if menu_item not in available_recipes:
                 available_recipes.append(menu_item)
                 
-            # ここで専用のIDを含んだキーを使うことで、過去の記憶を引き継がないようにする
             select_key = f"select_{st.session_state.menu_gen_id}_{i}"
-            
             st.selectbox(
                 f"Day {i+1} の献立", 
                 options=available_recipes, 
@@ -190,7 +198,7 @@ if page == "🏠 ホーム":
             if current_item in df_recipes["料理名"].values:
                 row = df_recipes[df_recipes["料理名"] == current_item].iloc[0]
                 diff = row["難易度"]
-                ings_raw = [item.strip() for item in row["食材"].split(",")]
+                ings_raw = [item.strip() for item in str(row["食材"]).split(",")]
             else:
                 diff = "?"
                 ings_raw = ["不明"]
@@ -231,17 +239,20 @@ elif page == "🍳 レシピ管理":
         new_name = st.text_input("料理名")
         new_diff = st.slider("難易度", 1, 5, 3)
         new_ings = st.text_input("必要な食材（カンマ `,` 区切りで入力）", placeholder="豚肉, キャベツ, 味噌")
-        
         season_options = ["通年", "春", "夏", "秋", "冬"]
         new_seasons = st.multiselect("季節を選択", season_options, default=["通年"])
         
         if st.form_submit_button("追加する"):
             if new_name and new_ings and new_seasons:
-                # レシピ名の重複登録を防止
                 if new_name in st.session_state.recipes["料理名"].values:
-                    st.error(f"「{new_name}」はすでに登録されています！別の名前にしてください。")
+                    st.error(f"「{new_name}」はすでに登録されています！")
                 else:
                     new_seasons_str = ", ".join(new_seasons)
+                    
+                    # スプレッドシートに書き込み
+                    recipe_ws.append_row([new_name, new_diff, new_ings, new_seasons_str])
+                    
+                    # 画面（セッション）も更新
                     new_row = pd.DataFrame({
                         "料理名": [new_name], 
                         "難易度": [new_diff], 
@@ -269,6 +280,7 @@ elif page == "❄️ 冷蔵庫管理":
         if st.button("追加", key="page_stock_btn"):
             if new_stock and new_stock not in st.session_state.inventory:
                 st.session_state.inventory.append(new_stock.strip())
+                inventory_ws.append_row([new_stock.strip()]) # シートに書き込み
                 st.rerun()
                 
     st.divider()
@@ -279,4 +291,5 @@ elif page == "❄️ 冷蔵庫管理":
         with colB:
             if st.button("消費", key=f"del_page_{item}"):
                 st.session_state.inventory.remove(item)
+                update_inventory_sheet() # シートから削除
                 st.rerun()
