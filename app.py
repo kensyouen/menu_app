@@ -39,15 +39,18 @@ def check_password():
 
 if not check_password(): st.stop()
 
-# --- 3. スプレッドシート連携 ---
-@st.cache_resource
-def init_connection():
-    creds = Credentials.from_service_account_info(json.loads(st.secrets["google_credentials"]), scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'])
-    return gspread.authorize(creds)
+# --- 3. スプレッドシート連携（🔥ここを修正しました） ---
+@st.cache_resource(ttl=600) # アクセス制限を防ぐため10分間接続状態を記憶する
+def get_worksheets():
+    creds = Credentials.from_service_account_info(
+        json.loads(st.secrets["google_credentials"]), 
+        scopes=['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+    )
+    client = gspread.authorize(creds)
+    sheet = client.open_by_url(st.secrets["sheet_url"])
+    return sheet.worksheet("レシピ"), sheet.worksheet("冷蔵庫"), sheet.worksheet("履歴")
 
-client = init_connection()
-sheet = client.open_by_url(st.secrets["sheet_url"])
-recipe_ws, inventory_ws, history_ws = sheet.worksheet("レシピ"), sheet.worksheet("冷蔵庫"), sheet.worksheet("履歴")
+recipe_ws, inventory_ws, history_ws = get_worksheets()
 
 def load_data():
     req = recipe_ws.get_all_records()
@@ -85,8 +88,8 @@ def analyze_image_with_ai(image_file):
         genai.configure(api_key=st.secrets["gemini_api_key"])
         response = genai.GenerativeModel('gemini-1.5-flash').generate_content([prompt, Image.open(image_file)])
         return [item.strip() for item in response.text.split(",") if item.strip()]
-    except Exception:
-        st.error("AIの解析に失敗しました。")
+    except Exception as e:
+        st.error(f"AIの解析に失敗しました。詳細: {e}")
         return []
 
 # --- 在庫管理の共通UI ---
@@ -166,7 +169,10 @@ page = st.radio("メニュー", ["🏠 ホーム", "🍳 レシピ", "❄️ 冷
 c_a, c_b = st.columns([3, 1])
 with c_a: st.caption(f"現在の季節: **{get_current_season()}**")
 with c_b:
-    if st.button("🔄 更新"): load_data(); st.rerun()
+    if st.button("🔄 更新"): 
+        get_worksheets.clear() # 強制的に記憶をリセットして最新のシート情報を取得する
+        load_data()
+        st.rerun()
 st.write("")
 
 if page == "🏠 ホーム":
