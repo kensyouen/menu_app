@@ -39,8 +39,8 @@ def check_password():
 
 if not check_password(): st.stop()
 
-# --- 3. スプレッドシート連携（🔥ここを修正しました） ---
-@st.cache_resource(ttl=600) # アクセス制限を防ぐため10分間接続状態を記憶する
+# --- 3. スプレッドシート連携 ---
+@st.cache_resource(ttl=600)
 def get_worksheets():
     creds = Credentials.from_service_account_info(
         json.loads(st.secrets["google_credentials"]), 
@@ -86,7 +86,8 @@ def analyze_image_with_ai(image_file):
     """
     try:
         genai.configure(api_key=st.secrets["gemini_api_key"])
-        response = genai.GenerativeModel('gemini-1.5-flash').generate_content([prompt, Image.open(image_file)])
+        # 🔥 古い "gemini-1.5-flash" から 最新の "gemini-3.6-flash" に変更しました！
+        response = genai.GenerativeModel('gemini-3.6-flash').generate_content([prompt, Image.open(image_file)])
         return [item.strip() for item in response.text.split(",") if item.strip()]
     except Exception as e:
         st.error(f"AIの解析に失敗しました。詳細: {e}")
@@ -170,7 +171,7 @@ c_a, c_b = st.columns([3, 1])
 with c_a: st.caption(f"現在の季節: **{get_current_season()}**")
 with c_b:
     if st.button("🔄 更新"): 
-        get_worksheets.clear() # 強制的に記憶をリセットして最新のシート情報を取得する
+        get_worksheets.clear()
         load_data()
         st.rerun()
 st.write("")
@@ -223,6 +224,7 @@ elif page == "🍳 レシピ":
                     else:
                         s_str = ", ".join(n_seasons)
                         recipe_ws.append_row([n_name, n_diff, n_ings, s_str])
+                        get_worksheets.clear()
                         load_data(); st.success(f"「{n_name}」を追加しました！"); st.rerun()
                 else: st.error("入力項目に不足があります。")
     with t_edit:
@@ -246,12 +248,14 @@ elif page == "🍳 レシピ":
                         if t_name in names:
                             idx = names.index(t_name) + 1
                             recipe_ws.update(range_name=f"A{idx}:D{idx}", values=[[e_name, e_diff, e_ings, ", ".join(e_seasons)]])
+                            get_worksheets.clear()
                             load_data(); st.success("更新しました！"); st.rerun()
                 else: st.error("入力項目に不足があります。")
             if d_btn:
                 names = recipe_ws.col_values(1)
                 if t_name in names:
                     recipe_ws.delete_rows(names.index(t_name) + 1)
+                    get_worksheets.clear()
                     load_data(); st.success("削除しました。"); st.rerun()
         else: st.info("登録レシピがありません。")
 
